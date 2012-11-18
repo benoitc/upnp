@@ -1,0 +1,13 @@
+%% -*- tab-width: 4;erlang-indent-level: 4;indent-tabs-mode: nil -*-
+%% ex: ft=erlang ts=4 sw=4 et
+
+{application, upnp,
+ [
+  {description, "refuge UPNP application"},
+  {vsn, "0.1"},
+  {registered, [upnp_sup]},
+  {applications, [kernel,stdlib, crypto, public_key, ssl, hackney,
+                  ranch, cowboy]},
+  {mod, { upnp_app, []}},
+  {env, []}
+ ]}.

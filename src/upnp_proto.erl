@@ -5,7 +5,7 @@
 %%      action control message.
 %% @end
 
--module(etorrent_upnp_proto).
+-module(upnp_proto).
 
 -include_lib("xmerl/include/xmerl.hrl").
 
@@ -23,7 +23,8 @@
          parse_ctl_err_resp/1,
          parse_sub_resp/1,
          guess_sub_resp/1,
-         parse_notify_msg/1]).
+         parse_notify_msg/1,
+         parse_cache_header/1]).
 
 %% @doc Parse UPnP device's response to M-SEARCH request.
 %%
@@ -38,54 +39,124 @@
 %%      ST: search target
 %%      USN: advertisement UUID'''
 %% @end
--spec parse_msearch_resp(string()) -> {ok, device,  etorrent_types:upnp_device()}
-                                    | {ok, service, etorrent_types:upnp_service()}
+-spec parse_msearch_resp(string()) -> {ok, device,  upnp_types:upnp_device()}
+                                    | {ok, service, upnp_types:upnp_service()}
                                     | {ok, uuid}
                                     | {error, _Reason}.
 parse_msearch_resp(Resp) ->
-    %% Only interested in headers, strips off first line of the response.
-    {ok, _, H} = erlang:decode_packet(http, list_to_binary(Resp), []),
-    case parse_headers(H) of
-        Headers when is_list(Headers) ->
-            Age = parse_max_age(Headers),
-            Loc = get_header(<<"LOCATION">>, Headers),
-            Svr = get_header(<<"SERVER">>, Headers),
-            ST  = get_header(<<"ST">>, Headers),
-            {Cat, Type, Ver} = case re:split(binary_to_list(ST), ":", [{return, binary}]) of
-                                   [_, _, C, T, V] -> {C, T, V};
-                                   [<<"upnp">>, ?UPNP_RD_NAME] -> {<<"device">>, ?UPNP_RD_NAME, <<>>};
-                                   [<<"uuid">>, _] -> {<<"uuid">>, <<>>, <<>>}
-                               end,
-            USN = get_header(<<"USN">>, Headers),
-            [_, UUID|_] = re:split(binary_to_list(USN), ":", [{return, binary}]),
-            case Cat of
-                <<"device">> ->
-                    {ok, device, [{type,    Type},
-                                  {ver,     Ver},
-                                  {uuid,    UUID},
-                                  {loc,     Loc},
-                                  {max_age, Age},
-                                  {server,  Svr}]};
-                <<"service">> ->
-                    {ok, service, [{type,   Type},
-                                   {ver,    Ver},
-                                   {uuid,   UUID},
-                                   {loc,    Loc}]};
-                <<"uuid">> ->
-                    {ok, uuid}
+    Headers = parse_headers(Resp),
+    Age = parse_max_age(Headers),
+    case upnp_util:get_value(<<"LOCATION">>, Headers) of
+        undefined ->
+            {error, no_loc_header};
+        Loc ->
+            Svr = upnp_util:get_value(<<"SERV">>, Headers, <<"">>),
+            case  upnp_util:get_value(<<"ST">>, Headers) of
+            undefined ->
+                {error, no_st_header};
+            ST ->
+                {Cat, Type, Ver} = case re:split(ST, <<":">>, [{return,
+                                                                binary}]) of
+                    [_, _, C, T, V] ->
+                        {C, T, V};
+                    [<<"upnp">>, ?UPNP_RD_NAME] ->
+                        {<<"device">>, ?UPNP_RD_NAME, <<>>};
+                    [<<"uuid">>| _] ->
+                        {<<"uuid">>, <<>>, <<>>};
+                    _ ->
+                        {<<>>, <<>>, <<>>}
+                end,
+                case upnp_util:get_value(<<"USN">>, Headers) of
+                undefined ->
+                    {error, no_usn_header};
+                USN ->
+                    [_, UUID|_] = re:split(USN, <<":">>, [{return, binary}]),
+                    case Cat of
+                        <<"device">> ->
+                            {ok, device, [{type,    Type},
+                                          {ver,     Ver},
+                                          {uuid,    UUID},
+                                          {loc,     Loc},
+                                          {max_age, Age},
+                                          {server,  Svr}]};
+                        <<"service">> ->
+                            {ok, service, [{type,   Type},
+                                           {ver,    Ver},
+                                           {uuid,   UUID},
+                                           {loc,    Loc}]};
+                        <<"uuid">> ->
+                            {ok, uuid};
+                        _ ->
+                            {error, unknown_st_headers}
+
+                    end
+                end
             end
+        end.
+
+
+parse_headers(Raw) when is_list(Raw) ->
+    parse_headers(list_to_binary(Raw));
+
+parse_headers(Raw) ->
+    parse_headers(Raw, []).
+
+parse_headers(Raw, Acc) ->
+    case erlang:decode_packet(httph, Raw, []) of
+        {ok, {http_error, _}, Rest} ->
+            parse_headers(Rest, Acc); %% bad header format
+        {ok, {http_header, _, H, _, V}, Rest} ->
+            H1 = upnp_util:to_upper(upnp_util:to_binary(H)),
+            parse_headers(Rest, [{H1,upnp_util:to_binary(V)} | Acc]);
+        _ ->
+            Acc
     end.
 
 parse_max_age(Headers) ->
-    case get_header(<<"CACHE-CONTROL">>, Headers) of
-        <<"max-age = ", A/binary>> ->
-            list_to_integer(binary_to_list(A))
+    case upnp_util:get_value(<<"CACHE-CONTROL">>, Headers) of
+        undefined ->
+            0;
+        Cache ->
+            CacheProps = parse_cache_header(binary_to_list(Cache)),
+            list_to_integer(proplists:get_value("max-age", CacheProps, "0"))
     end.
 
-get_header(Ty, H) ->
-    case lists:keyfind(Ty, 1, H) of
-        {_, V} -> V
-    end.
+
+%% @spec parse_cache_header(string()) -> {Type, [{K, V}]}
+%% @doc  Parse a Cache header
+parse_cache_header(String) ->
+    %% TODO: This is exactly as broken as Python's cgi module.
+    %%       Should parse properly like mochiweb_cookies.
+    Parts = [string:strip(S) || S <- string:tokens(String, ";")],
+    F = fun (S, Acc) ->
+                case lists:splitwith(fun (C) -> C =/= $= end, S) of
+                    {"", _} ->
+                        %% Skip anything with no name
+                        Acc;
+                    {_, ""} ->
+                        %% Skip anything with no value
+                        Acc;
+                    {Name, [$\= | Value]} ->
+                        [{string:to_lower(string:strip(Name)),
+                          unquote_header(string:strip(Value))} | Acc]
+                end
+        end,
+    lists:foldr(F, [], Parts).
+
+
+unquote_header("\"" ++ Rest) ->
+    unquote_header(Rest, []);
+unquote_header(S) ->
+    S.
+
+unquote_header("", Acc) ->
+    lists:reverse(Acc);
+unquote_header("\"", Acc) ->
+    lists:reverse(Acc);
+unquote_header([$\\, C | Rest], Acc) ->
+    unquote_header(Rest, [C | Acc]);
+unquote_header([C | Rest], Acc) ->
+    unquote_header(Rest, [C | Acc]).
 
 %% @doc Parses given description of a UPnP device.
 %%
@@ -115,8 +186,10 @@ get_header(Ty, H) ->
 %%      </service>'''
 %% @end
 -spec parse_description(inet:ip_address(), string())
-        -> {ok, [etorrent_types:upnp_device()],
-                [etorrent_types:upnp_service()]} | {error, _Reason}.
+        -> {ok, [upnp_types:upnp_device()],
+                [upnp_types:upnp_service()]} | {error, _Reason}.
+parse_description(LocalAddr, Desc) when is_binary(Desc) ->
+    parse_description(LocalAddr, binary_to_list(Desc));
 parse_description(LocalAddr, Desc) ->
     try
         {Xml, _} = xmerl_scan:string(Desc, [{space, normalize}]),
@@ -146,9 +219,9 @@ ll_parse_desc(LocalAddr, DS, {DAcc, SAcc}) ->
     catch
         error:Reason -> throw({error, Reason})
     end.
-    
 
--spec parse_device_desc(inet:ip_address(), term()) -> etorrent_types:upnp_device().
+
+-spec parse_device_desc(inet:ip_address(), term()) -> upnp_types:upnp_device().
 parse_device_desc(LocalAddr, Desc) ->
     T = extract_xml_text(xmerl_xpath:string("deviceType/text()", Desc)),
     [_, _, _, Type|_] = re:split(T, ":", [{return, binary}]),
@@ -164,19 +237,19 @@ parse_device_desc(LocalAddr, Desc) ->
 
 
 -spec parse_service_desc(inet:ip_address(), binary(), string()) ->
-                                etorrent_types:upnp_service().
+    upnp_types:upnp_service().
 parse_service_desc(LocalAddr, UUID, Desc) ->
     [T, SUrl, CUrl, EUrl] = [begin
-        N = xmerl_xpath:string(U ++ "/text()", Desc),
-        extract_xml_text(N)
-    end || U <- ["serviceType", "SCPDURL", "controlURL", "eventSubURL"]],
-    [_, _, _, Type|_] = re:split(T, ":", [{return, binary}]),
-    [proplists:property(type, Type),
-     proplists:property(uuid, UUID),
-     proplists:property(scpd_path, list_to_binary(SUrl)),
-     proplists:property(ctl_path, list_to_binary(CUrl)),
-     proplists:property(event_path, list_to_binary(EUrl)),
-     proplists:property(local_addr, LocalAddr)].
+                             N = xmerl_xpath:string(U ++ "/text()", Desc),
+                             extract_xml_text(N)
+                             end || U <- ["serviceType", "SCPDURL", "controlURL", "eventSubURL"]],
+                             [_, _, _, Type|_] = re:split(T, ":", [{return, binary}]),
+                             [proplists:property(type, Type),
+                             proplists:property(uuid, UUID),
+                             proplists:property(scpd_path, list_to_binary(SUrl)),
+                             proplists:property(ctl_path, list_to_binary(CUrl)),
+                             proplists:property(event_path, list_to_binary(EUrl)),
+                             proplists:property(local_addr, LocalAddr)].
 
 
 %% @doc Given service, action name and its arguments, assemble a UPnP
@@ -198,14 +271,14 @@ parse_service_desc(LocalAddr, UUID, Desc) ->
 %%      </s:Body>
 %%      </s:Envelope>'''
 %% @end
--spec build_ctl_msg(etorrent_types:upnp_service(), string(), [{string(), string()}]) -> string().
+-spec build_ctl_msg(upnp_types:upnp_service(), string(), [{string(), string()}]) -> string().
 build_ctl_msg(S, Action, Args) ->
     %% Die, SOAP, die.
     MHdr = "<?xml version=\"1.0\"?>"
-            "<s:Envelope"
-                " xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\""
-                " s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-            "<s:Body>",
+           "<s:Envelope"
+           " xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\""
+           " s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+           "<s:Body>",
     MFooter = "</s:Body></s:Envelope>",
     MAHdr = lists:append(["<u:", Action,
                           " xmlns:u=\"urn:schemas-upnp-org:service:",
@@ -243,6 +316,8 @@ build_ctl_msg(S, Action, Args) ->
 %%      </s:Envelope>'''
 %% @end
 -spec parse_ctl_err_resp(string()) -> {integer(), string()}.
+parse_ctl_err_resp(Resp) when is_binary(Resp) ->
+    parse_ctl_err_resp(binary_to_list(Resp));
 parse_ctl_err_resp(Resp) ->
     {Xml, _} = xmerl_scan:string(Resp),
     C = xmerl_xpath:string("//errorCode/text()", Xml),
@@ -252,25 +327,16 @@ parse_ctl_err_resp(Resp) ->
     {ECode, EDesc}.
 
 
-%% @doc Parse headers, quick'n'dirty variant
--define(CRLF, "\r\n").
-parse_headers(Bin) ->
-    Lines = binary:split(Bin, <<?CRLF>>, [global, trim]),
-    [begin
-         case binary:split(L, <<": ">>, [trim]) of
-             [Key, Value] -> {Key, Value};
-             Key -> {Key}
-         end
-     end || L <- Lines].
 %%
 %% @doc Parses UPnP service's response to our subscription request,
 %%      returns subscription id if succeeded. Or undefined if failed.
 %% @end
 %%
 -spec parse_sub_resp(term()) -> string() | undefined.
-parse_sub_resp(Resp) ->
-    
-    Headers = parse_headers(Resp),
+
+parse_sub_resp(Resp) when is_binary(Resp) ->
+    parse_sub_resp(parse_headers(Resp));
+parse_sub_resp(Headers) ->
     case lists:keyfind(<<"SID">>, 1, Headers) of
         false -> undefined;
         {_Key, <<"uuid:", Sid/binary>>} ->
@@ -300,7 +366,7 @@ guess_sub_resp(Resp) ->
 %%      </e:propertyset>
 %%      '''
 %% @end
-%% @todo See the explanation in ``etorrent_upnp_httpd''.
+%% @todo See the explanation in ``upnp_httpd''.
 -spec parse_notify_msg(binary()) -> undefined.
 parse_notify_msg(_Msg) ->
     undefined.

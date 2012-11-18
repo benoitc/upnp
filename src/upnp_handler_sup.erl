@@ -2,7 +2,7 @@
 %% @doc Supervises all processes of UPnP subsystem.
 %% @end
 
--module(etorrent_upnp_sup).
+-module(upnp_handler_sup).
 -behaviour(supervisor).
 
 
@@ -11,57 +11,56 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--export([start_link/0,
-         add_upnp_entity/2]).
+-export([start_link/1,
+         add_upnp_entity/3]).
 
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
 
-start_link() ->
-    SupName = {local, ?SERVER},
-    supervisor:start_link(SupName, ?MODULE, []).
+start_link(Specs) ->
+    supervisor:start_link({local, ?SERVER}, ?MODULE, Specs).
 
-    
-init([]) ->
-    UPNP_NET = {etorrent_upnp_net, {etorrent_upnp_net, start_link, []},
-                permanent, 2000, worker, [etorrent_upnp_net]},
-    HTTPd_Dispatch = [ {'_', [{'_', etorrent_upnp_handler, []}]} ],
-    HTTPd = cowboy:child_spec(upnp_cowboy,
-                              10, cowboy_tcp_transport, [{port, 1234}],
-                              cowboy_http_protocol, [{dispatch, HTTPd_Dispatch}]),
+
+init(Specs) ->
+    UPNP_NET = {upnp_net, {upnp_net, start_link, [Specs]},
+                permanent, 2000, worker, [upnp_net]},
+    HTTPd_Dispatch = [ {'_', [{'_', upnp_handler, []}]} ],
+    HTTPd = ranch:child_spec(upnp_cowboy,
+                              10, ranch_tcp, [{port, 0}],
+                              cowboy_protocol, [{dispatch, HTTPd_Dispatch}]),
     Children = [UPNP_NET, HTTPd],
     RestartStrategy = {one_for_one, 1, 60},
     {ok, {RestartStrategy, Children}}.
 
 
-add_upnp_entity(Category, Proplist) ->
+add_upnp_entity(Category, Proplist, Maps) ->
     %% Each UPnP device or service can be uniquely identified by its
     %% category + type + uuid.
-    ChildID = {etorrent_upnp_entity, Category,
+    ChildID = {upnp_entity, Category,
                proplists:get_value(type, Proplist),
                proplists:get_value(uuid, Proplist)},
     ChildSpec = {ChildID,
-                 {etorrent_upnp_entity, start_link, [Category, Proplist]},
+                 {upnp_entity, start_link, [Category, Proplist, Maps]},
                  permanent, 2000, worker, dynamic},
     case supervisor:start_child(?SERVER, ChildSpec) of
         {ok, _} -> ok;
         {error, {already_started, _}} ->
-            etorrent_upnp_entity:update(Category, Proplist)
+            upnp_entity:update(Category, Proplist, Maps)
     end.
 
 
 -ifdef(EUNIT).
 
 setup_upnp_sup_tree() ->
-    {event, Event} = {event, etorrent_event:start_link()},
-    {table, Table} = {table, etorrent_table:start_link()},
-    {upnp,  UPNP}  = {upnp,  etorrent_upnp_sup:start_link()},
+    {event, Event} = {event, upnp_event:start_link()},
+    {table, Table} = {table, upnp_table:start_link()},
+    {upnp,  UPNP}  = {upnp,  upnp_sup:start_link()},
     {Event, Table, UPNP}.
 
 teardown_upnp_sup_tree({Event, Table, UPNP}) ->
     Shutdown = fun
-        ({ok, Pid}) -> etorrent_utils:shutdown(Pid);
+        ({ok, Pid}) -> upnp_utils:shutdown(Pid);
         ({error, Reason}) -> Reason
     end,
     EventStatus = Shutdown(Event),
@@ -79,15 +78,14 @@ upnp_sup_test_() ->
 
 
 upnp_sup_tree_start_case() ->
-    etorrent_upnp_entity:create(device, [{type, <<"InternetGatewayDevice">>},
+    upnp_entity:create(device, [{type, <<"InternetGatewayDevice">>},
                                          {uuid, <<"whatever">>}]),
-    etorrent_upnp_entity:create(service, [{type, <<"WANIPConnection">>},
+    upnp_entity:create(service, [{type, <<"WANIPConnection">>},
                                           {uuid, <<"whatever">>}]),
-    etorrent_upnp_entity:update(service, [{type, <<"WANIPConnection">>},
+    upnp_entity:update(service, [{type, <<"WANIPConnection">>},
                                           {uuid, <<"whatever">>},
                                           {loc, {192,168,1,1}}]),
     ?assert(true).
 
 
 -endif.
-

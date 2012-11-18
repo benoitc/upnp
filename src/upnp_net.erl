@@ -4,12 +4,12 @@
 %%
 %%      Note that there's no discovery operation exported by this
 %%      module, because discovery is initiated automatically when
-%%      starting. 
+%%      starting.
 %%
-%% @todo May be able to substitute all etorrent_upnp_entity:method(Entity)
+%% @todo May be able to substitute all upnp_entity:method(Entity)
 %%       call with Entity:method. spots that pattern in mochiweb
 %% @end
--module(etorrent_upnp_net).
+-module(upnp_net).
 -behaviour(gen_server).
 
 -ifdef(TEST).
@@ -18,9 +18,9 @@
 -endif.
 
 %% API
--export([start_link/0,
+-export([start_link/1,
          description/2,
-         add_port_mapping/3,
+         add_port_mapping/4,
          subscribe/1,
          unsubscribe/1]).
 
@@ -32,7 +32,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {ssdp_sock :: inet:socket()}).
+-record(state, {ssdp_sock :: inet:socket(),
+                ip,
+                maps = []}).
 
 -define(SERVER, ?MODULE).
 -define(HTTP_SCHEME, "http://").
@@ -46,8 +48,8 @@
 %%===================================================================
 %% API
 %%===================================================================
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+start_link(Specs) ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, Specs, []).
 
 
 
@@ -75,9 +77,9 @@ start_link() ->
 %%      namely, their description Url, control Url, and event subscription
 %%      Url will be learned.
 %%
-%%      It is also worth metion that in this step, ``etorrent_upnp_net''
+%%      It is also worth metion that in this step, ``upnp_net''
 %%      learns which local address certain UPnP device uses to communicate
-%%      with it. This is important later on when etorrent UPnP subsystem
+%%      with it. This is important later on when  UPnP subsystem
 %%      subcribes to UPnP eventing.
 %% @end
 description(Cat, Prop) ->
@@ -100,34 +102,33 @@ description(Cat, Prop) ->
 %%      NT: upnp:event
 %%      TIMEOUT: Second-requested subscription duration'''
 %% @end
--spec subscribe(etorrent_types:upnp_service()) -> {ok, string()} | {error, _Reason}.
+-spec subscribe(upnp_types:upnp_service()) -> {ok, string()} | {error, _Reason}.
 subscribe(Service) ->
-    {PubUrl, SubUrl} = build_sub_url(Service),
-    case lhttpc:request(SubUrl, subscribe, [{"TIMEOUT", "infinite"},
-                                            {"NT", "upnp:event"},
-                                            {"CALLBACK", PubUrl}], 30000) of
-        {ok, {{_Status, _}, Headers, _Body}} ->
-            lager:debug("uPnP subscription done: ~s", [SubUrl]),
-            Sid = etorrent_upnp_proto:parse_sub_resp(Headers),
-            {ok, Sid};
+    PubSub = build_sub_url(Service),
+
+    case PubSub of
         {error, Reason} ->
-            case Reason of
-                {content_length_undefined, {stat_code, StatCode}, Headers} ->
-                    %% Device's embeded httpd may not be well behaved,
-                    %% make best effort to guess whatever it returns.
-                    case StatCode of
-                        "200" ->
-                            lager:debug("uPnp subscription done: ~s", [SubUrl]),
-                            Sid = etorrent_upnp_proto:guess_sub_resp(Headers),
-                            {ok, Sid};
+            {error, Reason};
+        {PubUrl, SubUrl} ->
+            case upnp_util:simple_request(subscribe, SubUrl,
+                                          [{<<"TIMEOUT">>, <<"infinite">>},
+                                           {<<"NT">>, <<"upnp:event">>},
+                                           {<<"CALLBACK">>, PubUrl}]) of
+                {ok, 200, Headers, _Body} ->
+                    lager:debug("uPnP subscription done: ~s", [SubUrl]),
+                    Sid = upnp_proto:parse_sub_resp(Headers),
+                    case Sid of
+                        undefined ->
+                            upnp_event:notify({malformed_upnp_sub_resp, Headers}),
+                            {error, <<"malformed upnp sub resp">>};
                         _ ->
-                            lager:warning("Malformed uPnP subscription response ~p", [Headers]),
-                            etorrent_event:notify(
-                              {malformed_upnp_sub_resp, Headers}),
-                            {error, Reason}
+                            {ok, Sid}
                     end;
-                _ ->
-                    etorrent_event:notify({upnp_sub_error, Reason}),
+                {ok, Status, _, Body} ->
+                    upnp_event:notify({upnp_sub_error, {Status, Body}}),
+                    {error, {Status, Body}};
+                {error, Reason} ->
+                    upnp_event:notify({upnp_sub_error, Reason}),
                     {error, Reason}
             end
     end.
@@ -141,35 +142,40 @@ subscribe(Service) ->
 %%      HOST: publisher host:publisher port
 %%      SID: uuid:subscription UUID'''
 %% @end
--spec unsubscribe(etorrent_types:upnp_service()) -> ok.
+-spec unsubscribe(upnp_types:upnp_service()) -> ok.
 unsubscribe(Service) ->
     {_PubUrl, SubUrl} = build_sub_url(Service),
-    lhttpc:request(SubUrl, unsubscribe, [{"SID",
-                                          "uuid:" ++ proplists:get_value(sid, Service)}],
-                   30000).
+    upnp_util:simple_request(unsubscribe, SubUrl,
+                             [{<<"SID">>, "uuid:" ++
+                               proplists:get_value(sid, Service)}]).
 
 %% @doc Add a port mapping to given UPnP service.
 %% @end
--spec add_port_mapping(etorrent_types:upnp_service(), tcp | udp, integer()) ->
-                        ok | {failed, integer(), string()} | {error, _Reason}.
-add_port_mapping(Service, Proto, Port) ->
-    Args = [{"NewRemoteHost",       ""},
-            {"NewExternalPort",     integer_to_list(Port)},
-            {"NewProtocol",         string:to_upper(atom_to_list(Proto))},
-            {"NewInternalPort",     integer_to_list(Port)},
-            {"NewInternalClient",   inet_parse:ntoa(proplists:get_value(local_addr, Service))},
-            {"NewEnabled",          "1"},
-            {"NewPortMappingDescription", "Etorrent"},
-            {"NewLeaseDuration",    "0"}],
+-spec add_port_mapping(string(), upnp_types:upnp_service(), tcp | udp,
+                       integer()) ->
+    ok | {failed, integer(), string()} | {error, _Reason}.
+add_port_mapping(Name, Service, Proto, Port) ->
+    Args = [{"NewRemoteHost", ""},
+            {"NewExternalPort", integer_to_list(Port)},
+            {"NewProtocol", string:to_upper(atom_to_list(Proto))},
+            {"NewInternalPort", integer_to_list(Port)},
+            {"NewInternalClient", proplists:get_value(local_addr, Service)},
+            {"NewEnabled", "1"},
+            {"NewPortMappingDescription", Name},
+            {"NewLeaseDuration", "0"}],
     invoke_action(Service, "AddPortMapping", Args).
 
 
 %%===================================================================
 %% gen_server callbacks
 %%===================================================================
-init([]) ->
-    {ok, Sock} = gen_udp:open(0, [{active, true}, inet]),
-    {ok, #state{ssdp_sock = Sock}, 0}.
+init(Specs) ->
+    Ip = upnp_util:parse_ip(proplists:get_value(ip, Specs, "0.0.0.0")),
+    Maps = proplists:get_value(maps, Specs, []),
+    lager:info("maps ~p~n", [Maps]),
+
+    {ok, Sock} = gen_udp:open(0, [{active, true}, inet, binary]),
+    {ok, #state{ssdp_sock = Sock, ip=Ip, maps=Maps}, 0}.
 
 
 handle_call({invoke_action, Service, Action, Args}, _From, S) ->
@@ -185,34 +191,40 @@ handle_call({invoke_action, Service, Action, Args}, _From, S) ->
     Type = proplists:get_value(type, Service),
     Ver = proplists:get_value(ver, Service),
     ActionUrl = build_ctl_url(Service),
-    ReqBody = etorrent_upnp_proto:build_ctl_msg(Service, Action, Args),
-    SoapAct = lists:append(["\"urn:schemas-upnp-org:service:",
-                            binary_to_list(Type),
-                            ":", binary_to_list(Ver),
-                            "#", Action, "\""]),
-    case lhttpc:request(ActionUrl, post,
-                        [{"CONTENT-LENGTH", length(ReqBody)},
-                         {"SOAPACTION", SoapAct},
-                         {"CONTENT-TYPE", "text/xml; charset=\"utf-8\""}],
-                        ReqBody,
-                        30*1000) of
-        {ok, {{200, _}, _H, _B}} ->
-            {reply, ok, S};
-        {ok, {{500, _}, _, RespBody}} ->
-            {ECode, EDesc} = etorrent_upnp_proto:parse_ctl_err_resp(RespBody),
-            {reply, {failed, ECode, EDesc}, S};
-        {ok, {{405, _}, _, _}} ->
-            %% UPnP 1.0 spec indicates an invocation request may be rejected
-            %% with a response of "405 Method Not Allowed", then a control
-            %% point should retry the same request with HTTP M-POST method.
-            %%
-            %% Unfortunately Erlang httpc module doesn't support HTTP
-            %% extension method, yet; ignores it and doesn't retry.
-            %% @todo: fix lhttpc? or the code here to do so
-            lager:warning("uPnP action failed, 405, M-POST not supported"),
-            {reply, {failed, 405, "M-POST not supported"}, S};
+    case ActionUrl of
         {error, Reason} ->
-            {reply, {error, Reason}, S}
+            {reply, {error, Reason}, S};
+        _ ->
+            ReqBody = upnp_proto:build_ctl_msg(Service, Action, Args),
+            SoapAct = lists:append(["\"urn:schemas-upnp-org:service:",
+                                    binary_to_list(Type),
+                                    ":", binary_to_list(Ver),
+                                    "#", Action, "\""]),
+
+            case upnp_util:simple_request(post, ActionUrl,
+                                          [{<<"SOAPACTION">>, SoapAct},
+                                           {<<"CONTENT-TYPE">>,
+                                            <<"text/xml; charset=\"utf-8\"">>}
+                                          ], ReqBody) of
+                {ok, 200, _, _} ->
+                    {reply, ok, S};
+                {ok, 405, _, _} ->
+                    %% UPnP 1.0 spec indicates an invocation request may be rejected
+                    %% with a response of "405 Method Not Allowed", then a control
+                    %% point should retry the same request with HTTP M-POST method.
+                    %%
+                    %% Unfortunately Erlang httpc module doesn't support HTTP
+                    %% extension method, yet; ignores it and doesn't retry.
+                    lager:warning("uPnP action failed, 405, M-POST not supported"),
+                    {reply, {failed, 405, "M-POST not supported"}, S};
+
+                {ok, _, _, RespBody} ->
+                    {ECode, EDesc} = upnp_proto:parse_ctl_err_resp(RespBody),
+                    {reply, {failed, ECode, EDesc}, S};
+
+                Error ->
+                    {reply, Error, S}
+            end
     end;
 handle_call(_Request, _From, S) ->
     {reply, ok, S}.
@@ -237,37 +249,38 @@ handle_cast({discover, ST}, #state{ssdp_sock = Sock} = S) ->
     MSearch = [<<"M-SEARCH * HTTP/1.1\r\n"
                 "HOST: 239.255.255.250:1900\r\n"
                 "MAN: \"ssdp:discover\"\r\n"
-                "MX: 1\r\n"
-                "ST: '">>, list_to_binary(ST), <<"'\r\n"
-                "\r\n">>],
-    %% If the connection is not ready, then we will have an error.
-    gen_udp:send(Sock, ?SSDP_ADDR, ?SSDP_PORT, iolist_to_binary(MSearch)),
+                "ST: ">>, list_to_binary(ST), <<"\r\n"
+                "MX: 3"
+                "\r\n\r\n">>],
+    ok = gen_udp:send(Sock, ?SSDP_ADDR, ?SSDP_PORT, iolist_to_binary(MSearch)),
     {noreply, S};
-handle_cast({description, Device}, State) ->
-    {ok, Devices, Services} = recv_desc(Device),
-    [etorrent_upnp_entity:update(device,  D) || D <- Devices],
-    [etorrent_upnp_entity:update(service, S) || S <- Services],
+handle_cast({description, Device}, #state{ip=Ip, maps=Maps}=State) ->
+    {ok, Devices, Services} = recv_desc(Ip, Device),
+    [upnp_entity:update(device,  D, Maps) || D <- Devices],
+    [upnp_entity:update(service, S, Maps) || S <- Services],
     {noreply, State}.
 
 
 handle_info(timeout, State) ->
     discover_all(),
     {noreply, State};
-handle_info({udp, _Socket, _IP, _Port, Packet}, State) ->
+handle_info({udp, _Socket, _IP, _Port, Packet}, #state{maps=Maps}=State) ->
     %% UPnP only uses UDP unicast/multicast in its discovery step,
     %% so this must be a UPnP device responds to our M-SEARCH request.
     %%
     %% @todo: UPnP device also announces its presence by sending to this
     %%        multicast group. Hanlde that.
-    case etorrent_upnp_proto:parse_msearch_resp(Packet) of
+    case upnp_proto:parse_msearch_resp(Packet) of
         {ok, device, D} ->
-            etorrent_upnp_entity:create(device, D);
+            upnp_entity:create(device, D, Maps);
         {ok, service, S} ->
-            etorrent_upnp_entity:create(service, S);
+            upnp_entity:create(service, S, Maps);
         {ok, uuid} ->
+            ok;
+        {error, Reason} ->
+            %% malformed UPNP headers
+            lager:debug("malformed UPNP header: ~p [~p]~n", [Reason, Packet]),
             ok
-        %% {error, _Reason} ->
-        %%     etorrent_event:notify({malformed_upnp_msearch_resp, Packet})
     end,
     {noreply, State};
 handle_info(Info, State) ->
@@ -316,23 +329,24 @@ discover(ST) ->
 %% @doc Retrieve given UPnP device's detailed description and extract
 %%      devices and services info from it.
 %% @end
--spec recv_desc(etorrent_types:upnp_device()) ->
-                       {ok, [etorrent_types:upnp_device()],
-                            [etorrent_types:upnp_service()]}.
-recv_desc(D) ->
+-spec recv_desc(any(), upnp_types:upnp_device()) ->
+                       {ok, [upnp_types:upnp_device()],
+                            [upnp_types:upnp_service()]}.
+recv_desc(Ip, D) ->
     Url = binary_to_list(proplists:get_value(loc, D)),
-    case lhttpc:request(Url, get, [{"ACCEPT-LANGUAGE", "en"}], 30*1000) of
-        {ok, {{_Status, _}, _Headers, Body}} ->
-            case etorrent_upnp_proto:parse_description("", Body) of
+    case upnp_util:simple_request(get, Url, [{<<"ACCEPT-LANGUAGE">>,
+                                              <<"en">>}]) of
+        {ok, _Status, _Headers, Body} ->
+            case upnp_proto:parse_description(Ip, Body) of
                 {ok, DS, SS} ->
                     {ok, DS, SS};
                 {error, Reason} ->
-                    etorrent_event:notify({malformed_upnp_desc, Body}),
+                    upnp_event:notify({malformed_upnp_desc, Body}),
                     {error, Reason}
-            end
-        %% {error, Reason} ->
-        %%     etorrent_event:notify({upnp_desc_error, Reason}),
-        %%     {error, Reason}
+            end;
+        {error, Reason} ->
+            upnp_event:notify({upnp_desc_error, Reason}),
+            {error, Reason}
     end.
 
 
@@ -344,43 +358,56 @@ recv_desc(D) ->
 %%      services and receives results and errors back. All communications
 %%      are sent as SOAP messages via HTTP.
 %% @end
--spec invoke_action(etorrent_types:upnp_service(), string(), [{string(), string()}]) ->
+-spec invoke_action(upnp_types:upnp_service(), string(), [{string(), string()}]) ->
                     ok | {failed, integer(), string()} | {error, _Reason}.
 invoke_action(Service, Action, Args) ->
     gen_server:call(?SERVER, {invoke_action, Service, Action, Args}, infinity).
 
 
 %% Construct publisher and subscriber Url for given sercvice.
--spec build_sub_url(etorrent_types:upnp_service()) -> {string(), string()}.
+-spec build_sub_url(upnp_types:upnp_service()) -> {string(), string()}.
 build_sub_url(Service) ->
-    PubHost = lists:append([inet_parse:ntoa(proplists:get_value(local_addr, Service)),
-                            ":", integer_to_list(etorrent_upnp_httpd:get_port())]),
-    %% enclosing <> is required by the spec.
-    PubUrl = lists:append(["<http://", PubHost, "/callme>"]),
-    SubUrl = lists:append(["http://",
-                           decode_host(binary_to_list(proplists:get_value(loc, Service))),
-                           binary_to_list(proplists:get_value(event_path, Service))]),
-    {PubUrl, SubUrl}.
+    HostValue = proplists:get_value(loc, Service),
+
+    case HostValue of
+        undefined ->
+            {error, no_host};
+        _ ->
+            PubHost = lists:append([proplists:get_value(local_addr, Service),
+                                    ":", integer_to_list(upnp_handler:get_port())]),
+
+            Host = decode_host(binary_to_list(HostValue)),
+            EventPath = binary_to_list(proplists:get_value(event_path, Service)),
+            %% enclosing <> is required by the spec.
+            PubUrl = lists:append(["<http://", PubHost, "/callme>"]),
+            SubUrl = lists:append(["http://", Host, EventPath]),
+            {PubUrl, SubUrl}
+    end.
 
 
 %% Construct given service's full control url.
 -spec build_ctl_url(proplists:proplist()) -> string().
 build_ctl_url(Service) ->
-    Url = binary_to_list(proplists:get_value(loc, Service)),
-    {Scheme, _UserInfo, _Host, _Port, _Path, _Query} =
-        etorrent_http_uri:parse(Url),
-    _CtlUrl = lists:append([atom_to_list(Scheme), "://",
-                            decode_host(Url),
-                            binary_to_list(proplists:get_value(ctl_path, Service))]).
+    HostValue = proplists:get_value(loc, Service),
+    case HostValue of
+        undefined ->
+            {error, no_host};
+        _ ->
+            Url = binary_to_list(HostValue),
+            {Scheme, _UserInfo, _Host, _Port, _Path, _Query} =
+                upnp_http_uri:parse(Url),
+            _CtlUrl = lists:append([atom_to_list(Scheme), "://",
+                                    decode_host(Url),
+                                    binary_to_list(proplists:get_value(ctl_path, Service))])
+    end.
 
 
-% Steals this from etorrent_http.
+% Steals this from upnp_http.
 decode_host(URL) ->
     {_Scheme, _UserInfo, Host, Port, _Path, _Query} =
-        etorrent_http_uri:parse(URL),
+        upnp_http_uri:parse(URL),
     case Port of
         80 -> Host;
         N when is_integer(N) ->
             Host ++ ":" ++ integer_to_list(N)
     end.
-

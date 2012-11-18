@@ -13,9 +13,9 @@
 %% @copyright Ericsson AB 2006-2009. All Rights Reserved.
 %% @doc URI-parsing library from OTP_R13B04-274-g3a68c36.
 %% <p>A simple steal of an internal HTTP parsing library to
-%% etorrent. It should probably be updated regurlarly.</p>
+%% upnp. It should probably be updated regurlarly.</p>
 %% @end
--module(etorrent_http_uri).
+-module(upnp_http_uri).
 
 -export([parse/1]).
 
