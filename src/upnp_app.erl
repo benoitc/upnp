@@ -2,15 +2,20 @@
 
 -behaviour(application).
 
+-export([start/0]).
+
 %% Application callbacks
 -export([start/2, stop/1]).
+
+start() ->
+    start_app_deps(upnp),
+    application:start(upnp).
 
 %% ===================================================================
 %% Application callbacks
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-    start_app_deps(upnp),
     upnp_sup:start_link().
 
 stop(_State) ->

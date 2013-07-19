@@ -1,8 +1,10 @@
 -module(upnp).
 
--export([start/2, stop/1,
+-export([start/0, start/2, stop/1,
          child_spec/2]).
 
+start() ->
+    upnp_app:start().
 
 %% @doc Start port mapping.
 %%
