@@ -7,7 +7,7 @@
 -module(upnp_handler).
 
 
--export([init/3, handle/2, terminate/2]).
+-export([init/3, handle/2, terminate/3]).
 
 %% API
 -export([get_port/0]).
@@ -47,5 +47,5 @@ handle(Req0, State) ->
             {ok, Reply, State}
     end.
 
-terminate(_Req, _State) ->
+terminate(_Reason, _Req, _State) ->
     ok.
