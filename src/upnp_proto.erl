@@ -197,7 +197,10 @@ parse_description(LocalAddr, Desc) ->
         {Devices, Services} = ll_parse_desc(LocalAddr, DS, {[], []}),
         {ok, Devices, Services}
     catch
-        error:Reason -> {error, Reason}
+        _:Reason ->
+            lager:debug("error ~p on parse ip ~w, description ~w",
+                        [Reason, LocalAddr, Desc]),
+            {error, Reason}
     end.
 
 ll_parse_desc(_LocalAddr, [], {DAcc, SAcc}) ->
@@ -231,7 +234,7 @@ parse_device_desc(LocalAddr, Desc) ->
     DVendor = extract_xml_text(xmerl_xpath:string("manufacturer/text()", Desc)),
     [proplists:property(type,           Type),
      proplists:property(uuid,           list_to_binary(UUID)),
-     proplists:property(long_name,      list_to_binary(DName)),
+     proplists:property(long_name,      unicode:characters_to_binary(DName)),
      proplists:property(manufacturer,   list_to_binary(DVendor)),
      proplists:property(local_addr,     LocalAddr)].
 
@@ -604,4 +607,3 @@ wrt54g_sub_resp_test() ->
 
 
 -endif.
-

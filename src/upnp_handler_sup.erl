@@ -28,7 +28,7 @@ init(Specs) ->
     HTTPd_Dispatch = [ {'_', [{'_', upnp_handler, []}]} ],
     HTTPd = ranch:child_spec(upnp_cowboy,
                               10, ranch_tcp, [{port, 0}],
-                              cowboy_protocol, [{dispatch, HTTPd_Dispatch}]),
+                              cowboy_protocol, [{env, [{dispatch, cowboy_router:compile(HTTPd_Dispatch)}]}]),
     Children = [UPNP_NET, HTTPd],
     RestartStrategy = {one_for_one, 1, 60},
     {ok, {RestartStrategy, Children}}.

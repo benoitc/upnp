@@ -255,9 +255,14 @@ handle_cast({discover, ST}, #state{ssdp_sock = Sock} = S) ->
     ok = gen_udp:send(Sock, ?SSDP_ADDR, ?SSDP_PORT, iolist_to_binary(MSearch)),
     {noreply, S};
 handle_cast({description, Device}, #state{ip=Ip, maps=Maps}=State) ->
-    {ok, Devices, Services} = recv_desc(Ip, Device),
-    [upnp_entity:update(device,  D, Maps) || D <- Devices],
-    [upnp_entity:update(service, S, Maps) || S <- Services],
+    case recv_desc(Ip, Device) of
+        {ok, Devices, Services} ->
+            lager:debug("updating ~p on ip ~p", [Device, Ip]),
+            [upnp_entity:update(device,  D, Maps) || D <- Devices],
+            [upnp_entity:update(service, S, Maps) || S <- Services];
+        Error ->
+            lager:debug("receiving description from ~p on ip ~p error ~p", [Device, Ip, Error])
+    end,
     {noreply, State}.
 
 
