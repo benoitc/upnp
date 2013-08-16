@@ -1,4 +1,14 @@
+This code is in maintenance mode only. It has been superceed by nat_upnp which is easier to use in your Erlang application:
+
+
+https://github.com/benoitc/nat_upnp
+
+
+
+
+
 # upnp support
+
 
 Application that provides a way to map a local port to the external
 using UPnP IGD.
