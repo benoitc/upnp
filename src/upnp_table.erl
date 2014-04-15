@@ -24,7 +24,7 @@
          terminate/2, code_change/3]).
 
 
--record(state, { monitoring :: dict() }).
+-record(state, { monitoring :: dict:dict() }).
 
 -define(SERVER, ?MODULE).
 -define(TAB_UPNP, upnp_entity).
