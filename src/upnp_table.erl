@@ -24,7 +24,11 @@
          terminate/2, code_change/3]).
 
 
+-ifdef('HAS_MOD_IN_TYPES').
+-record(state, { monitoring :: dict:dict() }).
+-else.
 -record(state, { monitoring :: dict() }).
+-endif.
 
 -define(SERVER, ?MODULE).
 -define(TAB_UPNP, upnp_entity).
