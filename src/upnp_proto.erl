@@ -1,4 +1,4 @@
-%% @author Edward Wang <yujiangw@gmail.com>
+%% @author Edward Wang <edward.yu.wang@gmail.com>
 %%
 %% @doc Utilities to manipulate UPnP wire message, such as parsing
 %%      M-SEARCH response, parsing device description, and assembling

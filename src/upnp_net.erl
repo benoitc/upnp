@@ -1,4 +1,4 @@
-%% @author Edward Wang <yujiangw@gmail.com>
+%% @author Edward Wang <edward.yu.wang@gmail.com>
 %% @doc Implements UPnP networking steps, namely, step 1 discovery,
 %%      step 2 description, step 3 control and step 4 eventing.
 %%

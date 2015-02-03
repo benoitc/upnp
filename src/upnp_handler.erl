@@ -1,4 +1,4 @@
-%% @author Edward Wang <yujiangw@gmail.com>
+%% @author Edward Wang <edward.yu.wang@gmail.com>
 %% @doc Implements a HTTP server for UPnP services to callback into.
 %% @end
 %%
