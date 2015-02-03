@@ -1,4 +1,4 @@
-%% @author Edward Wang <yujiangw@gmail.com>
+%% @author Edward Wang <edward.yu.wang@gmail.com>
 %% @doc Supervises all processes of UPnP subsystem.
 %% @end
 

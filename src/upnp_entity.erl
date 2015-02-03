@@ -1,4 +1,4 @@
-%% @author Edward Wang <yujiangw@gmail.com>
+%% @author Edward Wang <edward.yu.wang@gmail.com>
 %% @doc Represents a UPnP device or service.
 %% @end
 
